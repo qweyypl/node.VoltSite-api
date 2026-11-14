@@ -9,8 +9,9 @@
  * GET  /discord/:id              { nick, uuid } konta Minecraft połączonego z tym kontem Discord (Accounts.Recover.DiscordId) albo 404
  * GET  /recruit-access/:id      { positions: [slug], override } rekrutacje, których podania widzi to konto Discord, i czy może zmienić wydaną decyzję
  * GET  /tops                     { <id topki>: [{ name, value, tag? }] } (malejąco)
- * GET  /clans                    [] (klanów jeszcze nie ma na serwerze)
- * GET  /clans/:tag               404 (j.w.)
+ * GET  /clans                    [{ name, tag, members, xp, coins, voltcoins }] wszystkie klany (VOLT-MINECRAFT.Clans, VoltClans)
+ * GET  /clans/:tag               ClanStats albo 404 (tag bez względu na wielkość liter)
+ * GET  /clans-ranking?by=xp|coins|voltcoins|members  [{ place, name, tag, value }] (malejąco, 10 pierwszych)
  * GET  /visits?kind=player|clan  [{ key, monthlyVisits }] (bieżący miesiąc, VOLT-SITE.Visits)
  * POST /visits                   { kind, key, visitor } (visitor = adres IP + przeglądarka, liczony raz na dzień)
  * /recruit/...                  dane strony rekrutacji w VOLT-SITE: applications, open, blacklist, prefs (opis niżej, przy recruitRoute)
@@ -57,6 +58,7 @@ const accounts = () => game().collection('Accounts');
 const players = () => game().collection('PlayersData');
 const config = () => game().collection('Config');
 const instances = () => game().collection('Instances');
+const clans = () => game().collection('Clans');
 const orders = () => mongo.db(mongo.API).collection('Orders');
 const visits = () => mongo.db('VOLT-SITE').collection('Visits');
 // Kto już był dziś na danym profilu: skrót odwiedzającego (bez adresu IP w bazie), znika sam po 2 dniach (TTL).
@@ -196,7 +198,8 @@ async function playerStats(nick) {
         coins: num(economy.Coins),
         voltcoins: num(economy.VoltCoins),
         banned: account.Banned === true,
-        // Klanów nie ma jeszcze na serwerze: pole clan nie występuje.
+        // Klan gracza (VoltClans); pole nie występuje, gdy gracz nie jest w żadnym klanie.
+        ...(data.VoltClans && data.VoltClans.Tag ? { clan: { tag: String(data.VoltClans.Tag).toUpperCase() } } : {}),
         marriedTo,
         games: games(stats, await seasonNames()),
     };
@@ -224,8 +227,80 @@ async function tops() {
         top(players(), 'VoltEconomy.Coins', same),
         top(players(), 'VoltEconomy.VoltCoins', same),
     ]);
-    // Topki klanów są puste, bo klanów nie ma jeszcze na serwerze.
-    return { wygrane, czas, przegrane, poziom, coiny, voltcoiny, 'klan-xp': [], 'klan-coiny': [], 'klan-voltcoiny': [] };
+    const rows = await allClans();
+    const clanTop = (key) => rows.filter((clan) => clan[key] > 0)
+        .sort((a, b) => b[key] - a[key] || a.tag.localeCompare(b.tag)).slice(0, TOP_LIMIT)
+        .map((clan) => ({ name: clan.name, value: clan[key], tag: clan.tag }));
+    return { wygrane, czas, przegrane, poziom, coiny, voltcoiny, 'klan-xp': clanTop('xp'), 'klan-coiny': clanTop('coins'), 'klan-voltcoiny': clanTop('voltcoins') };
+}
+
+// ---- klany (VoltClans: VOLT-MINECRAFT.Clans, _id = tag małymi literami) ----------------------------
+
+const CLAN_TAG = /^[A-Za-z0-9]{1,16}$/;
+const CLAN_ROLES = { LEADER: 'Lider', OFFICER: 'Zastępca', MEMBER: 'Członek' };
+const CLAN_SORTS = { xp: 'xp', coins: 'coins', voltcoins: 'voltcoins', members: 'members' };
+
+// Skarbiec klanu to Coins (wcześniej Bank); XP i VoltCoiny klanu to pola, które czytają też topki VoltCore.
+function clanRow(doc) {
+    const tag = String(doc.Tag || doc._id).toUpperCase();
+    return {
+        name: String(doc.Name || tag),
+        tag,
+        members: Array.isArray(doc.Members) ? doc.Members.length : 0,
+        xp: num(doc.Xp),
+        coins: num(doc.Coins != null ? doc.Coins : doc.Bank),
+        voltcoins: num(doc.VoltCoins),
+        created: doc.Created,
+    };
+}
+
+async function allClans() {
+    return (await clans().find({}, { projection: { Members: 1, Tag: 1, Name: 1, Xp: 1, Coins: 1, Bank: 1, VoltCoins: 1, Created: 1 } })
+        .toArray()).map(clanRow);
+}
+
+async function clanList() {
+    return (await allClans()).sort((a, b) => a.tag.localeCompare(b.tag))
+        .map(({ name, tag, members, xp, coins, voltcoins }) => ({ name, tag, members, xp, coins, voltcoins }));
+}
+
+async function clanRanking(by) {
+    const key = CLAN_SORTS[by] || 'xp';
+    return (await allClans()).sort((a, b) => b[key] - a[key] || a.tag.localeCompare(b.tag)).slice(0, TOP_LIMIT)
+        .map((clan, index) => ({ place: index + 1, name: clan.name, tag: clan.tag, value: clan[key] }));
+}
+
+async function clanStats(tag) {
+    if (!CLAN_TAG.test(tag)) return null;
+    const doc = await clans().findOne({ _id: tag.toLowerCase() });
+    if (!doc) return null;
+    const row = clanRow(doc);
+    const settings = (await config().findOne({ _id: 'VoltClans' }, { projection: { 'max-members': 1 } })) || {};
+    // Numer klanu: miejsce w kolejności założenia (najstarszy = 1).
+    const created = doc.Created instanceof Date ? doc.Created : new Date(0);
+    const older = await clans().countDocuments({ Created: { $lt: created } });
+    const members = (Array.isArray(doc.Members) ? doc.Members : []).filter((m) => m && m.Nick).map((m) => ({
+        name: String(m.Nick),
+        role: CLAN_ROLES[m.Role] || 'Członek',
+        joinedAt: iso(m.Joined),
+        // Wkładu członków serwer jeszcze nie liczy.
+        xp: 0,
+        coins: 0,
+        voltcoins: 0,
+    }));
+    return {
+        id: older + 1,
+        tag: row.tag,
+        name: row.name,
+        createdAt: iso(doc.Created),
+        maxMembers: num(settings['max-members']) || members.length,
+        xpTax: 0,
+        coinTax: 0,
+        members,
+        xp: row.xp,
+        coins: row.coins,
+        voltcoins: row.voltcoins,
+    };
 }
 
 async function online() {
@@ -730,8 +805,14 @@ async function route(request) {
         return { status: 200, body: await recruitAccess(parts[1]) };
     }
     if (method === 'GET' && parts[0] === 'tops' && parts.length === 1) return { status: 200, body: await tops() };
-    if (method === 'GET' && parts[0] === 'clans' && parts.length === 1) return { status: 200, body: [] };
-    if (method === 'GET' && parts[0] === 'clans' && parts.length === 2) return { status: 404, body: { error: 'not-found' } };
+    if (method === 'GET' && parts[0] === 'clans' && parts.length === 1) return { status: 200, body: await clanList() };
+    if (method === 'GET' && parts[0] === 'clans' && parts.length === 2) {
+        const stats = await clanStats(decodeURIComponent(parts[1]));
+        return stats ? { status: 200, body: stats } : { status: 404, body: { error: 'not-found' } };
+    }
+    if (method === 'GET' && parts[0] === 'clans-ranking' && parts.length === 1) {
+        return { status: 200, body: await clanRanking(url.searchParams.get('by')) };
+    }
     if (parts[0] === 'visits' && parts.length === 1) {
         if (method === 'GET') {
             const list = await popular(url.searchParams.get('kind'));
