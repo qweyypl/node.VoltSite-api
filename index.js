@@ -757,6 +757,45 @@ function authorized(request) {
     return given.length === expected.length && crypto.timingSafeEqual(given, expected);
 }
 
+// Blokada zgadywania sekretu z zewnątrz: zapytania z portu 6500 przychodzą przez nginx, który ustawia X-Real-IP na adres
+// klienta (strony na tym VPS wołają 127.0.0.1:3300 bez tego nagłówka i nigdy nie są blokowane). Po FAIL_LIMIT złych
+// sekretach w FAIL_WINDOW_MS adres dostaje 403 na BLOCK_MS, także z dobrym sekretem.
+const FAIL_LIMIT = 5;
+const FAIL_WINDOW_MS = 15 * 60_000;
+const BLOCK_MS = 60 * 60_000;
+const failures = new Map();
+
+function clientIp(request) {
+    const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.socket.remoteAddress);
+    const ip = local ? request.headers['x-real-ip'] : request.socket.remoteAddress;
+    return typeof ip === 'string' && ip ? ip : null;
+}
+
+function blocked(ip) {
+    const entry = ip && failures.get(ip);
+    return Boolean(entry && entry.blockedUntil > Date.now());
+}
+
+function recordFailure(ip) {
+    if (!ip) return;
+    const now = Date.now();
+    let entry = failures.get(ip);
+    if (!entry || now - entry.since > FAIL_WINDOW_MS) entry = { since: now, count: 0, blockedUntil: 0 };
+    entry.count += 1;
+    if (entry.count >= FAIL_LIMIT) {
+        entry.blockedUntil = now + BLOCK_MS;
+        console.warn(`API: adres ${ip} zablokowany na ${BLOCK_MS / 60_000} min po ${entry.count} złych sekretach`);
+    }
+    failures.set(ip, entry);
+}
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [ip, entry] of failures) {
+        if (entry.blockedUntil <= now && now - entry.since > FAIL_WINDOW_MS) failures.delete(ip);
+    }
+}, 10 * 60_000).unref();
+
 function readBody(request) {
     return new Promise((resolve, reject) => {
         let size = 0;
@@ -852,7 +891,11 @@ async function main() {
     await site('ContentHistory').createIndex({ Key: 1, At: -1 });
     const server = http.createServer(async (request, response) => {
         let result;
-        if (!authorized(request)) {
+        const ip = clientIp(request);
+        if (blocked(ip)) {
+            result = { status: 403, body: { error: 'blocked' } };
+        } else if (!authorized(request)) {
+            recordFailure(ip);
             result = { status: 401, body: { error: 'unauthorized' } };
         } else {
             try {
