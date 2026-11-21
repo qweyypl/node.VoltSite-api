@@ -392,11 +392,9 @@ const RECRUIT_CONFIG = 'Rekrutacje';
 const ACCESS_CACHE_MS = 30_000;
 const accessCache = new Map();
 
-/** Role członka na serwerze głównym Discord (bot VoltCraft z VOLT-BOT.Main); [] gdy go tam nie ma. */
+/** Role członka na serwerze głównym Discord (klucze bota VoltCraft z .env VoltAPI SDK); [] gdy go tam nie ma. */
 async function memberRoles(discordId) {
-    const bot = await mongo.Main.findById('VoltCraft', { 'Discord.Token': 1, 'Discord.Guild': 1 }).lean();
-    const token = bot && bot.Discord && bot.Discord.Token;
-    const guild = bot && bot.Discord && bot.Discord.Guild;
+    const { Token: token, Guild: guild } = sdk.bot.discord('VoltCraft');
     if (!token || !guild) return [];
     const response = await fetch(`https://discord.com/api/v10/guilds/${guild}/members/${discordId}`, { headers: { Authorization: `Bot ${token}` } });
     if (!response.ok) return [];
