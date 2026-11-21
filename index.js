@@ -578,7 +578,7 @@ async function recruitRoute(method, parts, url, request) {
 // VOLT-SITE.Config/Panel    { sections: { <klucz treści>: [id ról serwera głównego] }, Override: [id ról z dostępem do wszystkiego] }
 // Strony czytają opublikowaną treść (albo szkic w trybie podglądu); brak dokumentu = treść wbudowana w stronę.
 const CONTENT_KEY = /^[a-z]+\.[a-z0-9-]+$/;
-const CONTENT_MAX = 2_000_000;
+const CONTENT_MAX = 20 * 1024 * 1024;
 const contentCache = new Map();
 const CONTENT_CACHE_MS = 3_000;
 const { ObjectId } = require('voltapi-sdk').mongoose.Types;
@@ -794,13 +794,16 @@ setInterval(() => {
     }
 }, 10 * 60_000).unref();
 
-function readBody(request) {
+// Limit ciała zapytania (20 MB, tyle co nginx i panel).
+const BODY_LIMIT = 20 * 1024 * 1024;
+
+function readBody(request, limit = BODY_LIMIT) {
     return new Promise((resolve, reject) => {
         let size = 0;
         const chunks = [];
         request.on('data', (chunk) => {
             size += chunk.length;
-            if (size > 16_384) {
+            if (size > limit) {
                 reject(new Error('too large'));
                 request.destroy();
             } else {
