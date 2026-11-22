@@ -177,6 +177,10 @@ async function playerStats(nick) {
         marriedTo = spouse ? spouse.Nick : undefined;
     }
 
+    // Klan gracza: VoltClans.Id to numer klanu (_id w Clans).
+    const clanId = data.VoltClans && data.VoltClans.Id;
+    const clanOfPlayer = clanId ? await clans().findOne({ _id: clanId, ...LIVE_CLAN }, { projection: { Tag: 1 } }) : null;
+
     const level = num(economy.Level);
     const ips = account.Ips || {};
     return {
@@ -199,7 +203,7 @@ async function playerStats(nick) {
         voltcoins: num(economy.VoltCoins),
         banned: account.Banned === true,
         // Klan gracza (VoltClans); pole nie występuje, gdy gracz nie jest w żadnym klanie.
-        ...(data.VoltClans && data.VoltClans.Tag ? { clan: { tag: String(data.VoltClans.Tag).toUpperCase() } } : {}),
+        ...(clanOfPlayer ? { clan: { tag: String(clanOfPlayer.Tag).toUpperCase() } } : {}),
         marriedTo,
         games: games(stats, await seasonNames()),
     };
@@ -234,7 +238,10 @@ async function tops() {
     return { wygrane, czas, przegrane, poziom, coiny, voltcoiny, 'klan-xp': clanTop('xp'), 'klan-coiny': clanTop('coins'), 'klan-voltcoiny': clanTop('voltcoins') };
 }
 
-// ---- klany (VoltClans: VOLT-MINECRAFT.Clans, _id = tag małymi literami) ----------------------------
+// ---- klany (VoltClans: VOLT-MINECRAFT.Clans, _id = numer klanu (Id); rozwiązany klan zostaje z Removed: true) ----
+
+// Klany, które istnieją (rozwiązane zostają w bazie z Removed: true).
+const LIVE_CLAN = { Removed: { $ne: true } };
 
 const CLAN_TAG = /^[A-Za-z0-9]{1,16}$/;
 const CLAN_ROLES = { LEADER: 'Lider', OFFICER: 'Zastępca', MEMBER: 'Członek' };
@@ -255,7 +262,7 @@ function clanRow(doc) {
 }
 
 async function allClans() {
-    return (await clans().find({}, { projection: { Members: 1, Tag: 1, Name: 1, Xp: 1, Coins: 1, Bank: 1, VoltCoins: 1, Created: 1 } })
+    return (await clans().find(LIVE_CLAN, { projection: { Members: 1, Tag: 1, Name: 1, Xp: 1, Coins: 1, Bank: 1, VoltCoins: 1, Created: 1 } })
         .toArray()).map(clanRow);
 }
 
@@ -272,13 +279,11 @@ async function clanRanking(by) {
 
 async function clanStats(tag) {
     if (!CLAN_TAG.test(tag)) return null;
-    const doc = await clans().findOne({ _id: tag.toLowerCase() });
+    const doc = await clans().findOne({ ...LIVE_CLAN, Tag: { $regex: `^${tag}$`, $options: 'i' } });
     if (!doc) return null;
     const row = clanRow(doc);
     const settings = (await config().findOne({ _id: 'VoltClans' }, { projection: { 'max-members': 1 } })) || {};
-    // Numer klanu: miejsce w kolejności założenia (najstarszy = 1).
-    const created = doc.Created instanceof Date ? doc.Created : new Date(0);
-    const older = await clans().countDocuments({ Created: { $lt: created } });
+    // Numer klanu: pole Id (VoltClans nadaje je raz i nigdy nie daje go ponownie innemu klanowi).
     const members = (Array.isArray(doc.Members) ? doc.Members : []).filter((m) => m && m.Nick).map((m) => ({
         name: String(m.Nick),
         role: CLAN_ROLES[m.Role] || 'Członek',
@@ -289,7 +294,7 @@ async function clanStats(tag) {
         voltcoins: 0,
     }));
     return {
-        id: older + 1,
+        id: num(doc.Id),
         tag: row.tag,
         name: row.name,
         createdAt: iso(doc.Created),
