@@ -282,25 +282,37 @@ async function clanStats(tag) {
     const doc = await clans().findOne({ ...LIVE_CLAN, Tag: { $regex: `^${tag}$`, $options: 'i' } });
     if (!doc) return null;
     const row = clanRow(doc);
-    const settings = (await config().findOne({ _id: 'VoltClans' }, { projection: { 'max-members': 1 } })) || {};
-    // Numer klanu: pole Id (VoltClans nadaje je raz i nigdy nie daje go ponownie innemu klanowi).
-    const members = (Array.isArray(doc.Members) ? doc.Members : []).filter((m) => m && m.Nick).map((m) => ({
-        name: String(m.Nick),
-        role: CLAN_ROLES[m.Role] || 'Członek',
-        joinedAt: iso(m.Joined),
-        // Wkładu członków serwer jeszcze nie liczy.
-        xp: 0,
-        coins: 0,
-        voltcoins: 0,
-    }));
+    const settings = (await config().findOne({ _id: 'VoltClans' }, { projection: { 'max-members': 1, 'clan-levels': 1 } })) || {};
+    // Wkład członków w klan: VoltClans.{Coins,VoltCoins,Xp} w PlayersData, liczone od dołączenia do tego klanu.
+    const given = new Map();
+    for (const player of await players().find({ 'VoltClans.Id': doc._id }, { projection: { Nick: 1, VoltClans: 1 } }).toArray()) {
+        if (player.Nick) given.set(String(player.Nick).toLowerCase(), player.VoltClans || {});
+    }
+    const members = (Array.isArray(doc.Members) ? doc.Members : []).filter((m) => m && m.Nick).map((m) => {
+        const own = given.get(String(m.Nick).toLowerCase()) || {};
+        return {
+            name: String(m.Nick),
+            role: CLAN_ROLES[m.Role] || 'Członek',
+            joinedAt: iso(m.Joined),
+            xp: Math.max(0, num(own.Xp)),
+            coins: Math.max(0, num(own.Coins)),
+            voltcoins: Math.max(0, num(own.VoltCoins)),
+        };
+    });
+    // Limit członków rośnie z poziomem klanu (jak w VoltClans: max-members + members-per-level * poziom, do members-cap).
+    const base = num(settings['max-members']) || 10;
+    const levels = settings['clan-levels'] || {};
+    const perLevel = levels['members-per-level'] != null ? num(levels['members-per-level']) : 1;
+    const cap = num(levels['members-cap']) || 50;
+    const maxMembers = Math.max(base, Math.min(cap, base + perLevel * Math.max(0, num(doc.Level))));
     return {
-        id: num(doc.Id),
+        id: num(doc._id),
         tag: row.tag,
         name: row.name,
         createdAt: iso(doc.Created),
-        maxMembers: num(settings['max-members']) || members.length,
-        xpTax: 0,
-        coinTax: 0,
+        maxMembers,
+        xpTax: num(doc.TaxXp),
+        coinTax: num(doc.TaxCoins),
         members,
         xp: row.xp,
         coins: row.coins,
