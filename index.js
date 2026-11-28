@@ -247,22 +247,22 @@ const CLAN_TAG = /^[A-Za-z0-9]{1,16}$/;
 const CLAN_ROLES = { LEADER: 'Lider', OFFICER: 'Zastępca', MEMBER: 'Członek' };
 const CLAN_SORTS = { xp: 'xp', coins: 'coins', voltcoins: 'voltcoins', members: 'members' };
 
-// Skarbiec klanu to Coins (wcześniej Bank); XP i VoltCoiny klanu to pola, które czytają też topki VoltCore.
+// Klan w bazie: Bank {Coins, VoltCoins}, Progress {Level, Xp}, Tax {Xp, Coins}; te same pola czytają topki VoltCore.
 function clanRow(doc) {
     const tag = String(doc.Tag || doc._id).toUpperCase();
     return {
         name: String(doc.Name || tag),
         tag,
         members: Array.isArray(doc.Members) ? doc.Members.length : 0,
-        xp: num(doc.Xp),
-        coins: num(doc.Coins != null ? doc.Coins : doc.Bank),
-        voltcoins: num(doc.VoltCoins),
+        xp: num((doc.Progress || {}).Xp),
+        coins: num((doc.Bank || {}).Coins),
+        voltcoins: num((doc.Bank || {}).VoltCoins),
         created: doc.Created,
     };
 }
 
 async function allClans() {
-    return (await clans().find(LIVE_CLAN, { projection: { Members: 1, Tag: 1, Name: 1, Xp: 1, Coins: 1, Bank: 1, VoltCoins: 1, Created: 1 } })
+    return (await clans().find(LIVE_CLAN, { projection: { Members: 1, Tag: 1, Name: 1, Progress: 1, Bank: 1, Created: 1 } })
         .toArray()).map(clanRow);
 }
 
@@ -304,15 +304,15 @@ async function clanStats(tag) {
     const levels = settings['clan-levels'] || {};
     const perLevel = levels['members-per-level'] != null ? num(levels['members-per-level']) : 1;
     const cap = num(levels['members-cap']) || 50;
-    const maxMembers = Math.max(base, Math.min(cap, base + perLevel * Math.max(0, num(doc.Level))));
+    const maxMembers = Math.max(base, Math.min(cap, base + perLevel * Math.max(0, num((doc.Progress || {}).Level))));
     return {
         id: num(doc._id),
         tag: row.tag,
         name: row.name,
         createdAt: iso(doc.Created),
         maxMembers,
-        xpTax: num(doc.TaxXp),
-        coinTax: num(doc.TaxCoins),
+        xpTax: num((doc.Tax || {}).Xp),
+        coinTax: num((doc.Tax || {}).Coins),
         members,
         xp: row.xp,
         coins: row.coins,
